@@ -1,0 +1,31 @@
+[project]
+name = "alphazero"
+version = "0.1.0"
+description = "Lean chess engine using AlphaZero (educational project)"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "tinygrad>=0.14.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["engine", "alphazero"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+ignore = ["E302", "E305", "I001"]
