@@ -38,7 +38,5 @@ class Config:
     steps: int = 700_000
     l2: float = 1e-4
     lr: tuple[float, ...] = (0.2, 0.02, 0.002, 0.0002)
-    checkpoint: int = 100
+    checkpoint: int = 2000
     lr_milestones: tuple[int, ...] = (100_000, 300_000, 500_000)
-    #replay_window
-    momentum: float = 0.9
