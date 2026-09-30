@@ -17,7 +17,6 @@ def _temperature(ply: int, config: Config) -> float:
     return config.temperature if ply < config.temperature_moves else 0.0
 
 def play_game(predict: Predict, config: Config, rng: np.random.Generator | None = None) -> list[Sample]:
-    """Play one self-play game; return labeled samples (empty if no moves)."""
     if rng is None:
         rng = np.random.default_rng()
     env = ChessEnv.startpos()
@@ -32,5 +31,5 @@ def play_game(predict: Predict, config: Config, rng: np.random.Generator | None 
         mcts.advance(i)
 
     outcome = env.outcome()
-    z = 0 if outcome is None else outcome   # hit max_plies -> draw
+    z = 0 if outcome is None else outcome
     return [Sample(planes=p, pi=pi, value=float(z * player)) for p, pi, player in raw]

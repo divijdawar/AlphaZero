@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 import math
 import numpy as np
-from engine.env import ChessEnv
+from engine.env import ChessEnv, position_key
 from engine.movegen import Move
 from .config import Config
 from .encode import encode, move_to_index
@@ -50,7 +50,7 @@ class Node:
         turn = self.env.board.turn
         idx = np.fromiter(
             (move_to_index(m, turn, config) for m in self.moves),
-            dtype=np.int, count=len(self.moves),
+            dtype=np.intp, count=len(self.moves),
         )
         z = logits[idx]
         p = np.exp(z - z.max())
@@ -114,11 +114,12 @@ def run_mcts(
 ) -> SearchResult:
     if rng is None:
         rng = np.random.default_rng()
-    if root is None:
+    if root is None or position_key(root.env.board) != position_key(root_env.board):
         root = Node(root_env)
-        logits, _ = predict(encode(root_env, config)[None])
-        root.expand(logits[0], config)
-    if add_noise:
+        if not root.terminal:
+            logits, _ = predict(encode(root_env, config)[None])
+            root.expand(logits[0], config)
+    if add_noise and root.expanded and not root.terminal:
         add_dirichlet_noise(root, config, rng)
 
     for _ in range(config.num_simulations):
