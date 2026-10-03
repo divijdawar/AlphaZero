@@ -24,7 +24,7 @@ class Config:
     #search
     num_simulations: int = 800
     c_puct: float = 1.0
-    dirichlet_alpha: tuple[float, ...] = (0.3, 0.15, 0.03)  # chess, shogi, go
+    dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
     temperature: float = 1.0
     temperature_moves: int = 30     # tau=1 for first N plies, greedy after

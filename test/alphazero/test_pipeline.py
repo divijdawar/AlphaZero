@@ -97,7 +97,11 @@ def test_pipeline_two_iters_exact_counts_and_reload(tmp_path):
         "final.safetensors", "step-2.safetensors", "step-4.safetensors",
     ]
 
-    saved = safe_load(str(tmp_path / "final.safetensors"))
+    saved = {
+        k.removeprefix("model."): v
+        for k, v in safe_load(str(tmp_path / "final.safetensors")).items()
+        if k.startswith("model.")
+    }
     x = np.zeros((1, 119, 8, 8), np.float32)
 
     def infer(m):
@@ -116,3 +120,32 @@ def test_pipeline_two_iters_exact_counts_and_reload(tmp_path):
     logits_loaded, value_loaded = infer(fresh)
     np.testing.assert_allclose(logits_loaded, logits_trained, rtol=1e-4, atol=1e-5)
     np.testing.assert_allclose(value_loaded, value_trained, rtol=1e-4, atol=1e-5)
+
+def test_load_checkpoint_restores_training_state(tmp_path):
+    from tinygrad.nn import optim
+    from tinygrad.nn.state import get_parameters, get_state_dict
+    from alphazero.train import _save_checkpoint, load_checkpoint
+
+    cfg = tiny_config(batch_size=2)
+    net = NeuralNet(cfg)
+    params = [p for p in get_parameters(net) if p.is_param]
+    opt = optim.SGD(params, lr=0.03, momentum=0.8, nesterov=True, fused=False)
+    planes = np.random.default_rng(0).standard_normal((2, 119, 8, 8)).astype(np.float32)
+    pi = np.zeros((2, cfg.num_actions), dtype=np.float32)
+    pi[:, 0] = 1
+    train_step(net, opt, params, (planes, pi, np.zeros((2, 1), np.float32)), cfg)
+
+    path = tmp_path / "checkpoint.safetensors"
+    _save_checkpoint(net, path, opt=opt, cfg=cfg, global_step=1,
+                     iteration=1, step_in_iteration=1)
+    loaded_net, loaded_opt, loaded_cfg, training = load_checkpoint(path)
+
+    assert loaded_cfg == cfg
+    assert training == {"global_step": 1, "iteration": 1, "step_in_iteration": 1}
+    assert type(loaded_opt) is type(opt)
+    assert (loaded_opt.momentum, loaded_opt.nesterov) == (0.8, True)
+    expected = get_state_dict({"model": net, "optimizer": opt})
+    actual = get_state_dict({"model": loaded_net, "optimizer": loaded_opt})
+    assert actual.keys() == expected.keys()
+    for name in expected:
+        np.testing.assert_array_equal(actual[name].numpy(), expected[name].numpy())
