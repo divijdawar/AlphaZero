@@ -16,8 +16,8 @@ class Config:
     num_block: int = 20
     num_filters: int = 256
     conv_kernel: int = 3
-    policy_head_filters: int = 256
-    value_head_filters: int = 256
+    policy_head_filters: int = 2
+    value_head_filters: int = 1
     value_hidden: int = 256
     bn_momentum: float = 0.99  # implementation choice, unspecified in paper
 
