@@ -10,11 +10,11 @@ def num_input_planes(cfg: Config) -> int:
 
 class ResidualBlock:
 
-    def __init__(self, num_filters: int, kernel_size: int = 3):
+    def __init__(self, num_filters: int, kernel_size: int = 3, bn_momentum: float = 0.1):
         self.conv1 = nn.Conv2d(num_filters, num_filters, kernel_size, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(num_filters)
+        self.bn1 = nn.BatchNorm2d(num_filters, momentum=bn_momentum)
         self.conv2 = nn.Conv2d(num_filters, num_filters, kernel_size, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(num_filters)
+        self.bn2 = nn.BatchNorm2d(num_filters, momentum=bn_momentum)
 
     def __call__(self, x: Tensor) -> Tensor:
         return (self.bn2(self.conv2(self.bn1(self.conv1(x)).relu())) + x).relu()
@@ -26,7 +26,7 @@ class NeuralNet:
         f = cfg.num_filters
         self.stem = nn.Conv2d(num_input_planes(cfg), f, cfg.conv_kernel, padding=1, bias=False)
         self.stem_bn = nn.BatchNorm2d(f, momentum=cfg.bn_momentum)
-        self.blocks = [ResidualBlock(f, cfg.conv_kernel) for _ in range(cfg.num_block - 1)]
+        self.blocks = [ResidualBlock(f, cfg.conv_kernel, cfg.bn_momentum) for _ in range(cfg.num_block - 1)]
         # policy head: 1x1 conv -> BN -> ReLU -> 1x1 conv to 73 action planes
         self.pol1 = nn.Conv2d(f, cfg.policy_head_filters, 1, bias=False)
         self.pol_bn = nn.BatchNorm2d(cfg.policy_head_filters, momentum=cfg.bn_momentum)

@@ -1,8 +1,9 @@
 import numpy as np
+import pytest
 
 from alphazero.config import Config
 from alphazero.selfplay import play_game
-from alphazero.train import ReplayBuffer, lr_for_step, make_predict, run_pipeline, train_step
+from alphazero.train import ReplayBuffer, lr_for_step, make_predict, resolve_lr_schedule, run_pipeline, train_step
 from alphazero.nn import NeuralNet
 
 def tiny_config(**over):
@@ -54,11 +55,66 @@ def test_train_step_is_finite():
     assert np.isfinite(loss)
 
 def test_lr_schedule():
-    cfg = tiny_config(lr=(0.2, 0.02, 0.002, 0.0002))
+    cfg = tiny_config(steps=700_000, lr=(0.2, 0.02, 0.002, 0.0002),
+                      lr_milestones=(100_000, 300_000, 500_000))
     assert lr_for_step(0, cfg) == 0.2
     assert lr_for_step(100_000, cfg) == 0.02
     assert lr_for_step(300_000, cfg) == 0.002
     assert lr_for_step(500_000, cfg) == 0.0002
+
+@pytest.mark.parametrize("steps,milestones", [
+    (100_000, (14_286, 42_857, 71_429)),
+    (70_000, (10_000, 30_000, 50_000)),
+    (4, (1, 2, 3)),
+])
+def test_default_lr_schedule_scales_and_decays_at_boundaries(steps, milestones):
+    cfg = resolve_lr_schedule(tiny_config(steps=steps))
+    assert cfg.lr == (0.01, 0.001, 0.0001, 0.00001)
+    assert cfg.lr_milestones == milestones
+    for i, milestone in enumerate(milestones):
+        assert lr_for_step(milestone - 1, cfg) == cfg.lr[i]
+        assert lr_for_step(milestone, cfg) == cfg.lr[i + 1]
+    assert lr_for_step(steps - 1, cfg) == cfg.lr[-1]
+
+def test_short_and_single_rate_runs_use_constant_lr():
+    for cfg in (tiny_config(steps=3), tiny_config(lr=(0.03,))):
+        resolved = resolve_lr_schedule(cfg)
+        assert resolved.lr_milestones == ()
+        assert lr_for_step(0, resolved) == lr_for_step(cfg.steps - 1, resolved) == cfg.lr[0]
+
+@pytest.mark.parametrize("overrides", [
+    {"lr": ()}, {"lr": (float("nan"),)}, {"lr": (0.0,)},
+    {"lr": (0.01, 0.001)}, {"steps": 0},
+    {"lr_milestones": (1, 2)}, {"lr_milestones": (1, 1, 2)},
+    {"lr_milestones": (2, 1, 3)}, {"lr_milestones": (0, 1, 2)},
+    {"lr_milestones": (1, 2, 100_000)}, {"lr_milestones": (1, 2, 3.5)},
+])
+def test_invalid_lr_schedule_rejected(overrides):
+    with pytest.raises(ValueError):
+        resolve_lr_schedule(tiny_config(**overrides))
+
+@pytest.mark.parametrize("momentum", [0.01, 0.1, 0.99])
+def test_configured_bn_momentum_reaches_every_layer(momentum):
+    net = NeuralNet(tiny_config(bn_momentum=momentum))
+    norms = [net.stem_bn, net.pol_bn, net.val_bn]
+    norms.extend(bn for block in net.blocks for bn in (block.bn1, block.bn2))
+    assert all(bn.momentum == momentum for bn in norms)
+    assert Config().bn_momentum == 0.1
+
+def test_pipeline_uses_and_saves_resolved_lr_schedule(tmp_path):
+    import json
+    from tinygrad.nn.state import safe_load_metadata
+
+    cfg = tiny_config(steps=4, batch_size=2, num_workers=1, checkpoint=0,
+                      max_plies=2, num_simulations=1)
+    metrics = []
+    net = run_pipeline(cfg, min_replay_size=1, seed=0, checkpoint_dir=str(tmp_path),
+                       log_every=1, log=metrics.append)
+    assert [m["learning_rate"] for m in metrics] == list(cfg.lr)
+    assert net.cfg.lr_milestones == (1, 2, 3)
+    _, _, header = safe_load_metadata(tmp_path / "final.safetensors")
+    saved_config = json.loads(header["__metadata__"]["config"])
+    assert saved_config["lr_milestones"] == [1, 2, 3]
 
 def test_pipeline_smoke(tmp_path):
     cfg = tiny_config()

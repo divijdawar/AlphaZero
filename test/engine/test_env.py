@@ -2,7 +2,7 @@ import pytest
 
 from engine.board import *
 from engine.movegen import Move
-from engine.env import ChessEnv, _insufficient_material, _king_square
+from engine.env import ChessEnv, _insufficient_material, _king_square, position_key
 
 def _mv(uci):
     (fr, fc), (tr, tc) = parse_square(uci[:2]), parse_square(uci[2:4])
@@ -67,15 +67,63 @@ def test_stalemate():
     assert env.result_for(WHITE) == 0
     assert env.result_for(BLACK) == 0
 
-def test_seventyfive_move_rule_boundary():
-    assert ChessEnv.from_fen("4k3/8/8/8/8/8/8/R3K2R w - - 150 120").outcome() == 0
-    fresh = ChessEnv.from_fen("4k3/8/8/8/8/8/8/R3K2R w - - 149 120")
+def test_fifty_move_rule_boundary():
+    assert ChessEnv.from_fen("4k3/8/8/8/8/8/8/R3K2R w - - 100 120").outcome() == 0
+    fresh = ChessEnv.from_fen("4k3/8/8/8/8/8/8/R3K2R w - - 99 120")
     assert fresh.outcome() is None
     assert not fresh.is_terminal()
 
-def test_seventyfive_move_reached_by_step():
-    env = ChessEnv.from_fen("4k3/8/8/8/8/8/8/4K2R w - - 149 100")
+def test_fifty_move_reached_by_step():
+    env = ChessEnv.from_fen("4k3/8/8/8/8/8/8/4K2R w - - 99 100")
     assert env.step(_mv("h1h2")) == 0
+
+@pytest.mark.parametrize("fen,move", [
+    ("4k3/8/8/8/8/8/P7/4K2R w - - 99 100", "a2a3"),
+    ("4k3/8/8/8/8/7p/8/4K2R w - - 99 100", "h1h3"),
+    ("k7/8/8/3pP2K/8/8/8/8 w - d6 99 100", "e5d6"),
+])
+def test_no_progress_clock_resets(fen, move):
+    env = ChessEnv.from_fen(fen)
+    assert env.step(_mv(move)) is None
+    assert env.board.halfmove == 0
+
+def test_checkmate_precedes_fifty_move_draw():
+    env = ChessEnv.from_fen("6k1/5ppp/8/8/8/8/8/R6K w - - 99 100")
+    assert env.step(_mv("a1a8")) == WHITE
+    assert env.board.halfmove == 100
+
+@pytest.mark.parametrize("fen", [
+    "k3r3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+    "k7/8/8/r2pP2K/8/8/8/8 w - d6 0 1",
+    "4k3/8/8/8/3Pp3/8/8/K3R3 b - d3 0 1",
+    "8/8/8/8/R2Pp2k/8/8/K7 b - d3 0 1",
+])
+def test_illegal_en_passant_does_not_change_repetition_key(fen):
+    board = Board.from_fen(fen)
+    without_ep = board.copy()
+    without_ep.ep = None
+    assert set(ChessEnv(board).legal_moves()) == set(ChessEnv(without_ep).legal_moves())
+    assert position_key(board) == position_key(without_ep)
+    reconstructed = ChessEnv(history=[board, without_ep, without_ep.copy()])
+    assert reconstructed.counts[position_key(board)] == 3
+    assert reconstructed.outcome() == 0
+
+@pytest.mark.parametrize("fen", [
+    "k7/8/8/3pP2K/8/8/8/8 w - d6 0 1",
+    "8/8/8/8/3Pp2k/8/8/K7 b - d3 0 1",
+    "k3r3/8/8/2PpP3/8/8/8/4K3 w - d6 0 1",
+])
+def test_legal_en_passant_changes_repetition_key(fen):
+    board = Board.from_fen(fen)
+    without_ep = board.copy()
+    without_ep.ep = None
+    assert position_key(board) != position_key(without_ep)
+
+def test_unavailable_en_passant_does_not_change_repetition_key():
+    board = Board.from_fen("k7/8/8/3p3K/8/8/8/8 w - d6 0 1")
+    without_ep = board.copy()
+    without_ep.ep = None
+    assert position_key(board) == position_key(without_ep)
 
 def test_threefold_repetition():
     env = ChessEnv.startpos()

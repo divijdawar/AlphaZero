@@ -3,7 +3,7 @@ from collections import Counter
 from .board import *
 from .movegen import Move, is_attacked, legal_moves, make_move
 
-SEVENTY_FIVE_MOVES = 150
+FIFTY_MOVE_HALFMOVES = 100  # AlphaZero automatically draws after 50 moves per side.
 
 def _king_square(board: Board, king: int) -> tuple[int, int]:
     for r in range(8):
@@ -18,10 +18,13 @@ def _normalize_ep(board: Board) -> tuple[int, int] | None:
     r, c = board.ep
     pr = r + (1 if board.turn == WHITE else -1)
     pawn = PAWN * board.turn
-    for fc in (c - 1, c + 1):
-        if in_bounds(pr, fc) and int(board.board[pr, fc]) == pawn:
-            return board.ep
-    return None
+    candidates = [
+        Move(pr, fc, r, c) for fc in (c - 1, c + 1)
+        if in_bounds(pr, fc) and int(board.board[pr, fc]) == pawn
+    ]
+    # An adjacent pawn may be pinned, or removing both pawns may expose its king.
+    moves = legal_moves(board) if candidates else ()
+    return board.ep if any(move in moves for move in candidates) else None
 
 def position_key(board: Board) -> tuple:
     return (board.board.tobytes(), board.turn, board.castling, _normalize_ep(board))
@@ -116,7 +119,7 @@ class ChessEnv:
             kr, kc = _king_square(self.board, KING * self.board.turn)
             return -self.board.turn if is_attacked(self.board, kr, kc, enemy) else 0
         if (
-            self.board.halfmove >= SEVENTY_FIVE_MOVES
+            self.board.halfmove >= FIFTY_MOVE_HALFMOVES
             or self.counts[position_key(self.board)] >= 3
             or _insufficient_material(self.board)
         ):

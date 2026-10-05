@@ -41,31 +41,27 @@ def start_worker(cfg: Config, seed: int = 0) -> WorkerGroup:
     seeds = np.random.SeedSequence(seed).spawn(cfg.num_workers)
     processes = []
 
-    for actor_id in range(cfg.num_workers):
-        process = ctx.Process(
-            target=selfplay_worker,
-            args=(
-                actor_id,
-                cfg,
-                seeds[actor_id],
-                requests,
-                replies[actor_id],
-                completed_games,
-                stop,
-            ),
-            name=f"selfplay-{actor_id}",
-        )
-
-        process.start()
-        processes.append(process)
-
-    return WorkerGroup(
+    actors = WorkerGroup(
         processes=processes,
         requests=requests,
         replies=replies,
         completed_games=completed_games,
         stop=stop,
     )
+    try:
+        for actor_id in range(cfg.num_workers):
+            process = ctx.Process(
+                target=selfplay_worker,
+                args=(actor_id, cfg, seeds[actor_id], requests,
+                      replies[actor_id], completed_games, stop),
+                name=f"selfplay-{actor_id}",
+            )
+            process.start()
+            processes.append(process)
+    except BaseException:
+        stop_workers(actors)
+        raise
+    return actors
 
 def stop_workers(actors: WorkerGroup, timeout: float = 5.0) -> None:
     actors.stop.set()

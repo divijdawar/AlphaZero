@@ -9,7 +9,7 @@ class Config:
     num_rep_planes: int = 2
     num_const_planes:int = 7
     num_policy_planes: int = 73     # 56 queen + 8 knight + 9 underpromo
-    num_workers: int = 4
+    num_workers: int = 2
     num_actions: int = 4672
 
     #network
@@ -19,10 +19,10 @@ class Config:
     policy_head_filters: int = 2
     value_head_filters: int = 1
     value_hidden: int = 256
-    bn_momentum: float = 0.99  # implementation choice, unspecified in paper
+    bn_momentum: float = 0.1   # new-batch weight: retain 90% of running statistics
 
     #search
-    num_simulations: int = 800
+    num_simulations: int = 100
     c_puct: float = 1.0
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
@@ -31,12 +31,12 @@ class Config:
 
     #selfplay
     max_plies: int = 512            # overlong games scored as a draw
-    buffer_size: int = 500_000
+    buffer_size: int = 50_000
 
     #training
-    batch_size: int = 256
-    steps: int = 700_000
+    batch_size: int = 64
+    steps: int = 100_000
     l2: float = 1e-4
-    lr: tuple[float, ...] = (0.2, 0.02, 0.002, 0.0002)
+    lr: tuple[float, ...] = (0.01, 0.001, 0.0001, 0.00001)
     checkpoint: int = 2000
-    lr_milestones: tuple[int, ...] = (100_000, 300_000, 500_000)
+    lr_milestones: tuple[int, ...] | None = None  # None scales decays to steps
