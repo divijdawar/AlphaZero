@@ -28,6 +28,7 @@ dist/
 
 # Training artefacts (run_pipeline default checkpoint_dir='checkpoints')
 checkpoints/
+runs/
 *.pt
 *.pth
 *.safetensors

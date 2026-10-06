@@ -49,10 +49,55 @@ def test_train_step_is_finite():
     from tinygrad.nn import optim
     from tinygrad.nn.state import get_parameters
 
-    params = [p for p in get_parameters(net) if p.is_param]
-    opt = optim.SGD(params, lr=0.1, momentum=0.9)
+    model_tensors = get_parameters(net)
+    params = [p for p in model_tensors if p.is_param]
+    opt = optim.SGD(model_tensors, lr=0.1, momentum=0.9)
     loss = train_step(net, opt, params, buf.sample(4, np.random.default_rng(1)), cfg)
     assert np.isfinite(loss)
+
+def test_optimizer_realizes_batchnorm_updates(monkeypatch):
+    from tinygrad import Tensor
+    from tinygrad.nn import optim
+    from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict
+
+    cfg = tiny_config(batch_size=2)
+    net = NeuralNet(cfg)
+    reference = NeuralNet(cfg)
+    initial = {name: tensor.clone().realize() for name, tensor in get_state_dict(net).items()}
+    load_state_dict(reference, initial, strict=True, verbose=False)
+    model_tensors = get_parameters(net)
+    params = [p for p in model_tensors if p.is_param]
+    opt = optim.SGD(model_tensors, lr=0.01, momentum=0.9, fused=False)
+    reference_tensors = get_parameters(reference)
+    reference_params = [p for p in reference_tensors if p.is_param]
+    reference_buffers = [p for p in reference_tensors if not p.is_param]
+
+    reference_opt = optim.SGD(reference_params, lr=0.01, momentum=0.9, fused=False)
+    reference_step = reference_opt.step
+
+    def explicit_buffer_step():
+        # Compute statistics from the forward pass before weights change.
+        Tensor.realize(*reference_buffers)
+        reference_step()
+
+    monkeypatch.setattr(reference_opt, "step", explicit_buffer_step)
+    planes = np.random.default_rng(0).standard_normal((2, 119, 8, 8)).astype(np.float32)
+    pi = np.zeros((2, cfg.num_actions), np.float32)
+    pi[:, 0] = 1
+    batch = planes, pi, np.zeros((2, 1), np.float32)
+    for _ in range(10):
+        train_step(net, opt, params, batch, cfg)
+        train_step(reference, reference_opt, reference_params, batch, cfg)
+
+    reference_state = get_state_dict(reference)
+    # Read candidate statistics only at the end: reading them each step would
+    # realize them and conceal the deferred-update bug.
+    for name, tensor in get_state_dict(net).items():
+        if not tensor.is_param:
+            np.testing.assert_allclose(tensor.numpy(), reference_state[name].numpy(),
+                                       rtol=1e-5, atol=1e-6, err_msg=name)
+            if name.endswith("num_batches_tracked"):
+                assert tensor.item() == 10
 
 def test_lr_schedule():
     cfg = tiny_config(steps=700_000, lr=(0.2, 0.02, 0.002, 0.0002),
