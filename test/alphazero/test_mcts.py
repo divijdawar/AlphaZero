@@ -271,3 +271,21 @@ def test_temperature_zero_is_greedy():
     move, i = select_action(res.root, 0.0, np.random.default_rng(0))
     assert move == res.root.moves[i]
     assert i == int(np.argmax(res.root.N))
+
+def test_search_owns_root_and_invalidates_clock_or_history_changes():
+    cfg = Config(num_simulations=2)
+    predict, _ = uniform_predict(cfg)
+    mcts = MCTS(predict, cfg, np.random.default_rng(0))
+    env = ChessEnv.startpos()
+    root = mcts.search(env, add_noise=False).root
+    env.step(mv("g1f3"))
+    assert root.env.ply == 0 and root.env.to_fen() != env.to_fen()
+    for uci in ("g8f6", "f3g1", "f6g8"):
+        env.step(mv(uci))
+    root = mcts.search(env, add_noise=False).root
+    no_history = ChessEnv.from_fen(env.to_fen())
+    assert mcts.search(no_history, add_noise=False).root is not root
+    board = no_history.board.copy()
+    board.halfmove = 100
+    root = mcts.search(ChessEnv(board), add_noise=False).root
+    assert root.terminal and not root.expanded and root.value == 0

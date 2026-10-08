@@ -6,6 +6,13 @@ This repo is an implementation of the paper [AlphaZero](https://arxiv.org/abs/17
 
 ## Training metrics
 
+Inference and training use persistent TinyJit captures by default. Pass
+`--no-jit` to run without captures. Each model snapshot owns its inference
+captures, which are released when that snapshot retires.
+
+`ChessEnv` boards and histories are read-only and shared safely by search clones.
+To edit a position, use `env.board.copy()` and construct a new `ChessEnv` from it.
+
 Training prints interval-average total, policy, value, and regularization losses,
 learning rate, completed games, replay size, and wall-time throughput. Progress is
 printed every 100 updates or 30 seconds by default, including during replay

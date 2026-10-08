@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 from engine.board import *
-from engine.env import ChessEnv, position_key
+from engine.env import ChessEnv
 from engine.movegen import KNIGHT_DELTAS, Move
 from .config import Config
 
@@ -57,7 +57,7 @@ def encode(env: ChessEnv, config:Config) -> np.ndarray:
     turn = env.board.turn
     black = turn == BLACK
 
-    for t, board in enumerate(env.frames(config.history_steps)):
+    for t, (board, key) in enumerate(zip(env.frames(config.history_steps), env.frame_keys(config.history_steps))):
         off = t * step_planes
         grid = board.board
         for r in range(8):
@@ -68,7 +68,7 @@ def encode(env: ChessEnv, config:Config) -> np.ndarray:
                     continue
                 own = (v > 0) == (turn == WHITE)
                 planes[off + (abs(v) - 1) + (0 if own else 6), pr, c] = 1.0
-        reps = env.counts[position_key(board)]  # occurrences incl. current
+        reps = env.counts[key]  # occurrences incl. current
         if reps >= 2:
             planes[off + 12, :, :] = 1.0  # seen once before -> 2-fold risk
         if reps >= 3:

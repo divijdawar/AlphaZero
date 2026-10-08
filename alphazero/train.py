@@ -13,7 +13,7 @@ from pathlib import Path
 from queue import Empty
 from time import monotonic
 
-from tinygrad import Context, Tensor
+from tinygrad import Context, Tensor, TinyJit
 from tinygrad.nn import optim
 from tinygrad.nn.state import (
     get_parameters, get_state_dict, load_state_dict, safe_load, safe_load_metadata,
@@ -26,14 +26,38 @@ from .metrics import MetricWindow, RunMetrics, format_metrics, require_plotly
 from .nn import NeuralNet
 from .selfplay import Sample, WorkerGroup, start_worker, stop_workers
 
-def make_predict(net: NeuralNet, cfg: Config) -> Predict:
-    def predict(planes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def make_predict(net: NeuralNet, cfg: Config, *, jit: bool = True) -> Predict:
+    captures = {}
+
+    def forward(planes: Tensor) -> tuple[Tensor, Tensor]:
         with Context(TRAINING=0):
-            logits, value = net(Tensor(planes))
-            return (
-                logits.numpy().astype(np.float32),
-                value.numpy().reshape(-1).astype(np.float32),
-            )
+            logits, value = net(planes)
+            Tensor.realize(logits, value)
+            return logits, value
+
+    def predict(planes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if not len(planes):
+            return np.empty((0, cfg.num_actions), np.float32), np.empty(0, np.float32)
+        outputs = []
+        # Five fixed shapes bound capture memory per snapshot; larger inputs
+        # use several captures without changing how actors' requests are gathered.
+        for start in range(0, len(planes), 16 if jit else len(planes)):
+            batch = np.ascontiguousarray(planes[start:start + 16] if jit else planes, dtype=np.float32)
+            size = len(batch)
+            bucket = 1 << (size - 1).bit_length() if jit else size
+            if bucket != size:
+                batch = np.pad(batch, ((0, bucket - size), (0, 0), (0, 0), (0, 0)))
+            if jit and bucket not in captures:
+                captures[bucket] = TinyJit(forward)
+            execute = captures[bucket] if jit else forward
+            logits, value = execute(Tensor(batch, device=net.stem.weight.device).realize())
+            # Own these arrays: JIT output buffers are reused, and queue
+            # feeder threads may serialize replies after the next inference.
+            outputs.append((logits.numpy()[:size].astype(np.float32),
+                            value.numpy()[:size].reshape(-1).astype(np.float32)))
+        if len(outputs) == 1:
+            return outputs[0]
+        return np.concatenate([p for p, _ in outputs]), np.concatenate([v for _, v in outputs])
     return predict
 
 class ReplayBuffer:
@@ -159,15 +183,14 @@ def collect_requests(
 
 def run_inference(
     actors: WorkerGroup,
-    snapshots: dict[int, NeuralNet],
+    predictors: dict[int, Predict],
     batches: dict[int, list[tuple[int, np.ndarray]]],
     last_activity: list[float],
-    cfg: Config,
 ) -> None:
     """Batch across workers using the same snapshot, then route their results."""
     for version, requests in batches.items():
         planes = np.concatenate([planes for _, planes in requests], axis=0)
-        logits, values = make_predict(snapshots[version], cfg)(planes)
+        logits, values = predictors[version](planes)
         offset = 0
         for actor_id, actor_planes in requests:
             end = offset + len(actor_planes)
@@ -179,10 +202,12 @@ def run_inference(
 
 def retire_snapshots(
     snapshots: dict[int, NeuralNet], leases: dict[int, int], latest_version: int,
+    predictors: dict[int, Predict],
 ) -> None:
     keep = set(leases.values()) | {latest_version}
     for version in list(snapshots):
         if version not in keep:
+            del predictors[version]
             del snapshots[version]
 
 def generate_selfplay(
@@ -192,6 +217,7 @@ def generate_selfplay(
     *,
     replay: ReplayBuffer,
     seed: int = 0,
+    jit: bool = True,
 ) -> int:
     if num_games < 0:
         raise ValueError("num_games cannot be negative")
@@ -204,6 +230,7 @@ def generate_selfplay(
     leases: dict[int, int] = {}
     last_activity = [monotonic()] * cfg.num_workers
     completed = 0
+    predictors = {0: make_predict(net, cfg, jit=jit)}
     try:
         while completed < num_games:
             _check_workers(actors, last_activity, timeout=None)
@@ -217,11 +244,45 @@ def generate_selfplay(
             if completed == num_games:
                 break
             batches = collect_requests(actors, 0, leases, last_activity)
-            run_inference(actors, {0: net}, batches, last_activity, cfg)
+            run_inference(actors, predictors, batches, last_activity)
     finally:
         stop_workers(actors)
     return completed
 
+
+def _train_step_tensors(
+    net: NeuralNet,
+    opt: optim.Optimizer,
+    params: list[Tensor],
+    planes: Tensor,
+    pi: Tensor,
+    z: Tensor,
+    cfg: Config,
+) -> Tensor:
+    with Context(TRAINING=1):
+        logits, value = net(planes)
+        policy_loss = -(pi * logits.log_softmax(axis=1)).sum(axis=1).mean()
+        value_loss = (z - value).square().mean()
+        l2_loss = cfg.l2 * sum((p.square().sum() for p in params), start=Tensor(0.0))
+        loss = policy_loss + value_loss + l2_loss
+
+        opt.zero_grad()
+        loss.backward()
+        # Preserve this batch's losses before mutable parameter buffers change.
+        values = Tensor.stack(loss, policy_loss, value_loss, l2_loss).realize()
+        opt.step()
+    return values
+
+def make_train_step(net: NeuralNet, opt: optim.Optimizer, params: list[Tensor], cfg: Config,
+                    *, jit: bool = True) -> Callable[[Tensor, Tensor, Tensor], Tensor]:
+    # Even CONST_LR must be a physical, mutable buffer before it is captured.
+    opt.lr = opt.lr.clone().realize()
+    Tensor.realize(*get_state_dict(net).values(), *get_state_dict(opt).values())
+
+    def step(planes: Tensor, pi: Tensor, z: Tensor) -> Tensor:
+        return _train_step_tensors(net, opt, params, planes, pi, z, cfg)
+
+    return TinyJit(step) if jit else step
 
 def train_step(
     net: NeuralNet,
@@ -231,26 +292,17 @@ def train_step(
     cfg: Config,
     *,
     metrics: dict[str, float] | None = None,
+    tensor_step: Callable[[Tensor, Tensor, Tensor], Tensor] | None = None,
 ) -> float:
-    planes, pi, z = batch
-    with Context(TRAINING=1):
-        logits, value = net(Tensor(planes))
-        policy_loss = -(Tensor(pi) * logits.log_softmax(axis=1)).sum(axis=1).mean()
-        value_loss = (Tensor(z) - value).square().mean()
-        l2_loss = cfg.l2 * sum((p.square().sum() for p in params), start=Tensor(0.0))
-        loss = policy_loss + value_loss + l2_loss
-
-        opt.zero_grad()
-        loss.backward()
-        # Preserve this batch's losses before mutable parameter buffers change.
-        values = Tensor.stack(loss, policy_loss, value_loss, l2_loss).realize() if metrics is not None else None
-        opt.step()
+    tensors = [Tensor(np.ascontiguousarray(a, dtype=np.float32), device=opt.device).realize() for a in batch]
+    values = tensor_step(*tensors) if tensor_step is not None else _train_step_tensors(net, opt, params, *tensors, cfg)
+    losses = values.numpy()
 
     if metrics is None:
-        return float(loss.item())
+        return float(losses[0])
     metrics.update(zip(
         ("loss", "policy_loss", "value_loss", "regularization_loss"),
-        map(float, values.numpy()),
+        map(float, losses),
     ))
     return metrics["loss"]
 
@@ -267,6 +319,7 @@ def _save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     opt_state = {k: v for k, v in vars(opt).items() if k not in ("params", "buffers")}
+    opt_state["fused"] = bool(opt.fused)
     model_names = {id(tensor): name for name, tensor in get_state_dict(net).items()}
     state = get_state_dict({"model": net, "optimizer": opt_state})
     metadata = {
@@ -350,6 +403,7 @@ def run_pipeline(
     log: Callable[[dict], None] | None = None,
     metrics_dir: str | os.PathLike[str] | None = None,
     open_report: bool = False,
+    jit: bool = True,
 ) -> NeuralNet:
     """Keep CPU actors alive while the parent alternates inference and training.
 
@@ -378,6 +432,7 @@ def run_pipeline(
         "checkpoint_dir": str(checkpoint_dir), "min_replay_size": min_replay_size,
         "replay_ratio": replay_ratio, "publish_every": publish_every,
         "max_snapshots": max_snapshots, "worker_timeout": worker_timeout,
+        "jit": jit,
     })
 
     Tensor.manual_seed(seed)
@@ -389,8 +444,10 @@ def run_pipeline(
     params = [p for p in model_tensors if p.is_param]
     # SGD realizes non-trainable buffers alongside each parameter update.
     opt = optim.SGD(model_tensors, lr=float(cfg.lr[0]), momentum=0.9)
+    tensor_step = make_train_step(learner, opt, params, cfg, jit=jit)
     replay = ReplayBuffer(cfg.buffer_size)
     snapshots = {0: copy_network(learner, cfg)}
+    predictors = {0: make_predict(snapshots[0], cfg, jit=jit)}
     latest_version = last_publish_step = global_step = completed_games = 0
     leases: dict[int, int] = {}
     training_credit = 0.0
@@ -451,10 +508,10 @@ def run_pipeline(
             # Exclude time spent in the parent's GPU/disk work from the worker
             # watchdog: blocked actors cannot make progress until we reply.
             busy_start = monotonic()
-            run_inference(actors, snapshots, batches, last_activity, cfg)
+            run_inference(actors, predictors, batches, last_activity)
             busy_elapsed = monotonic() - busy_start
             last_activity[:] = [min(monotonic(), t + busy_elapsed) for t in last_activity]
-            retire_snapshots(snapshots, leases, latest_version)
+            retire_snapshots(snapshots, leases, latest_version, predictors)
 
             if len(replay) < min_replay_size or training_credit < 1:
                 # Logging time is parent work, just like inference and saving.
@@ -465,11 +522,13 @@ def run_pipeline(
                 continue
 
             busy_start = monotonic()
-            last_learning_rate = lr_for_step(global_step, cfg)
-            opt.lr.assign(last_learning_rate)
+            learning_rate = lr_for_step(global_step, cfg)
+            if learning_rate != last_learning_rate:
+                opt.lr.assign(learning_rate).realize()
+            last_learning_rate = learning_rate
             step_metrics = {} if log is not None or saved_metrics is not None else None
             train_step(learner, opt, params, replay.sample(cfg.batch_size, rng), cfg,
-                       metrics=step_metrics)
+                       metrics=step_metrics, tensor_step=tensor_step)
             if step_metrics is not None:
                 window.record_update(step_metrics)
             global_step += 1
@@ -482,8 +541,10 @@ def run_pipeline(
                 pinned = set(leases.values())
                 for version in list(snapshots):
                     if version not in pinned:
+                        del predictors[version]
                         del snapshots[version]
                 snapshots[global_step] = copy_network(learner, cfg)
+                predictors[global_step] = make_predict(snapshots[global_step], cfg, jit=jit)
                 latest_version = last_publish_step = global_step
 
             if cfg.checkpoint > 0 and global_step % cfg.checkpoint == 0:
@@ -510,6 +571,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=defaults.steps)
     parser.add_argument("--workers", type=int, default=defaults.num_workers)
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size)
+    parser.add_argument("--no-jit", action="store_true", help="disable inference and training captures")
     parser.add_argument("--lr", type=float, nargs="+", default=defaults.lr,
                         help="learning rates (default: 0.01, 0.001, 0.0001, 0.00001)")
     parser.add_argument("--lr-milestones", type=int, nargs="*", default=None,
@@ -549,6 +611,7 @@ def main() -> None:
             log_every=args.log_every, log_seconds=args.log_seconds,
             log=lambda record: print(format_metrics(record), flush=True),
             metrics_dir=args.metrics_dir, open_report=args.open_report,
+            jit=not args.no_jit,
         )
 
 

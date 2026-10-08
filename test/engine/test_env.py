@@ -153,8 +153,9 @@ def test_from_fen_construction():
 def test_history_constructor_uses_last():
     h = [Board.startpos()]
     env = ChessEnv(history=h)
-    assert env.board is h[-1]
-    assert env.history == h
+    assert env.board == h[-1]
+    assert env.board is not h[-1]
+    assert env.history == tuple(h)
     assert env.history is not h
     b = Board.startpos()
     env2 = ChessEnv(board=b.copy(), history=[b])
@@ -197,7 +198,7 @@ def test_clone_matches_state():
     _play(env, ["e2e4", "e7e5"])
     c = env.clone()
     assert c.board == env.board
-    assert c.board is not env.board
+    assert c.board is env.board  # immutable position shared by both histories
     assert c.ply == env.ply
     assert c.history == env.history
 
@@ -209,7 +210,8 @@ def test_clone_is_independent():
     assert env.ply == 2
     assert len(env.history) == 3
     assert c.ply == 3
-    c.board.board[0, 0] = EMPTY
+    with pytest.raises(ValueError):
+        c.board.board[0, 0] = EMPTY
     assert env.board.board[0, 0] != EMPTY
 
 def test_clone_preserves_repetition_counts():
@@ -243,6 +245,78 @@ def test_frames_window():
     f = env.frames(8)
     assert len(f) == 8
     assert f[:5] == [env.history[0]] * 5
-    assert f[5:] == env.history[1:]
-    assert env.frames(4) == env.history
-    assert env.frames(2) == env.history[-2:]
+    assert f[5:] == list(env.history[1:])
+    assert env.frames(4) == list(env.history)
+    assert env.frames(2) == list(env.history[-2:])
+
+def test_environment_owns_immutable_positions():
+    board = Board.startpos()
+    env = ChessEnv(board)
+    board.board[0, 0] = EMPTY
+    board.halfmove = 100
+    assert env.to_fen() == START_FEN
+    with pytest.raises(ValueError):
+        env.board.board.setflags(write=True)
+    view = env.board.board
+    view.resize((64,), refcheck=False)
+    assert env.board.board.shape == (8, 8)
+    for name in ("board", "turn", "castling", "ep", "halfmove", "fullmove"):
+        with pytest.raises(AttributeError):
+            setattr(env.board, name, None)
+        with pytest.raises(AttributeError):
+            delattr(env.board, name)
+    with pytest.raises(AttributeError):
+        env.history = ()
+    with pytest.raises(AttributeError):
+        env.board = board
+    with pytest.raises(TypeError):
+        env.counts[position_key(env.board)] = 10
+    mutable = env.board.copy()
+    mutable.board[0, 0] = EMPTY
+    mutable.turn = BLACK
+    assert env.to_fen() == START_FEN
+
+def test_clone_reuses_history_keys_and_position_caches(monkeypatch):
+    import engine.env as environment
+    from unittest.mock import Mock
+
+    env = ChessEnv.startpos()
+    _play(env, ["e2e4", "e7e5"])
+    env.outcome()
+    moves = env.legal_moves()
+    calls = Mock(wraps=environment.legal_moves)
+    monkeypatch.setattr(environment, "legal_moves", calls)
+    clone = env.clone()
+    assert clone.history is env.history
+    assert clone._history_keys is env._history_keys
+    assert clone._counts is not env._counts
+    monkeypatch.setattr(environment, "position_key", lambda *a: pytest.fail("rebuilt a cached key"))
+    assert clone.outcome() is None
+    returned = clone.legal_moves()
+    returned.clear()
+    assert clone.legal_moves() == moves
+    assert clone.frame_keys(8) == [position_key(b) for b in clone.frames(8)]
+    calls.assert_not_called()
+
+@pytest.mark.parametrize("fen", [
+    START_FEN,
+    "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+    "k7/8/8/3pP2K/8/8/8/8 w - d6 0 1",
+    "4k3/P7/8/8/8/8/7p/4K3 w - - 0 1",
+])
+def test_search_transition_matches_checked_transition(fen):
+    env = ChessEnv.from_fen(fen)
+    assert not env.is_terminal()
+    moves = env.legal_moves()
+    for move in moves:
+        checked, fast = env.clone(), env.clone()
+        assert fast._step_legal(move) == checked.step(move)
+        assert fast.history == checked.history
+        assert fast.counts == checked.counts
+        assert fast.frame_keys(8) == checked.frame_keys(8)
+    assert env.legal_moves() == moves
+
+def test_terminal_fen_rejects_step_before_outcome_was_queried():
+    env = ChessEnv.from_fen("4k3/8/8/8/8/8/8/R3K2R w - - 100 120")
+    with pytest.raises(ValueError, match="already over"):
+        env.step(_mv("a1a2"))

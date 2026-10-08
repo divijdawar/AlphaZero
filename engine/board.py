@@ -176,6 +176,10 @@ class Board:
     def copy(self) -> Board:
         return Board(self.board, self.turn, self.castling, self.ep, self.halfmove, self.fullmove)
 
+    def frozen_copy(self) -> Board:
+        """An immutable position safe to share between search histories."""
+        return self if isinstance(self, _FrozenBoard) else _FrozenBoard(self)
+
     def piece_at(self, r: int, c: int) -> int:
         return int(self.board[r, c])
 
@@ -192,3 +196,21 @@ class Board:
 
     def __repr__(self) -> str:
         return f"Board({self.to_fen()!r})"
+
+class _FrozenBoard(Board):
+    def __init__(self, source: Board):
+        grid = np.frombuffer(source.board.tobytes(), dtype=np.int8).reshape(8, 8)
+        object.__setattr__(self, "_grid", grid)
+        for name in ("turn", "castling", "ep", "halfmove", "fullmove"):
+            object.__setattr__(self, name, getattr(source, name))
+
+    @property
+    def board(self) -> np.ndarray:
+        # A fresh view also isolates edits to ndarray metadata (shape/dtype).
+        return self._grid.view()
+
+    def __setattr__(self, name, value):
+        raise AttributeError("environment boards are immutable; use Board.copy()")
+
+    def __delattr__(self, name):
+        raise AttributeError("environment boards are immutable; use Board.copy()")

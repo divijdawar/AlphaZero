@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 import math
 import numpy as np
-from engine.env import ChessEnv, position_key
+from engine.env import ChessEnv
 from engine.movegen import Move
 from .config import Config
 from .encode import encode, move_to_index
@@ -75,7 +75,7 @@ def child(node: Node, i: int) -> Node:
     c = node.children.get(i)
     if c is None:
         env = node.env.clone()
-        env.step(node.moves[i])
+        env._step_legal(node.moves[i])
         c = Node(env, node, node.moves[i])
         node.children[i] = c
     return c
@@ -114,8 +114,8 @@ def run_mcts(
 ) -> SearchResult:
     if rng is None:
         rng = np.random.default_rng()
-    if root is None or position_key(root.env.board) != position_key(root_env.board):
-        root = Node(root_env)
+    if root is None or root.env.search_key != root_env.search_key:
+        root = Node(root_env.clone())
         if not root.terminal:
             logits, _ = predict(encode(root_env, config)[None])
             root.expand(logits[0], config)
